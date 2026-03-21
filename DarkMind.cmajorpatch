@@ -1,0 +1,19 @@
+{
+    "CmajorVersion": 1,
+    "ID": "com.sealsestate.darkmind.mk3",
+    "version": "3.0.0",
+    "name": "Dark Mind Mk3",
+    "description": "SoftClock 3 Relativistic Synthesis Engine",
+    "category": "Synth",
+    "manufacturer": "Seals Estate",
+    "website": "https://github.com/sealsestate/darkmind",
+    "isInstrument": true,
+
+    "source": [ "DarkMind_Amorph.cmajor" ],
+
+    "view": {
+        "width": 800,
+        "height": 500,
+        "resizable": true
+    }
+}
