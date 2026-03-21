@@ -1,0 +1,158 @@
+//==============================================================================
+// AMORPH FRAMEWORK // DARK MIND MARK 3
+// OWNERSHIP: SEALS ESTATE (L.S. / L.D. / L.S.)
+// ALL RIGHTS RESERVED.
+//==============================================================================
+
+graph DarkMind_Amorph [[ main ]]
+{
+    input stream float grit       [[ name: "Grit (Entropy)", min: 0, max: 1.0, init: 0.1 ]];
+    input stream float bpm        [[ name: "BPM (Gravity)", min: 40, max: 300, init: 120 ]];
+    input stream float recollect  [[ name: "Reme (Memory)", min: 0, max: 1.0, init: 0 ]];
+    
+    input event std::notes::Message midiIn;
+    output stream float out;
+
+    // --- NODE ARCHITECTURE ---
+    node engine = NeuralCore;
+    node clock  = SoftClock3;
+    node reme   = RemeBuffer;
+
+    connection
+    {
+        // 1. Temporal Entrainment
+        bpm   -> clock.bpm;
+        grit  -> clock.entropy;
+        
+        // 2. Signal Path
+        midiIn      -> engine.midiIn;
+        grit        -> engine.grit;
+        engine.out  -> reme.audioIn;
+        
+        // 3. Memory Path
+        recollect   -> reme.recollect;
+        reme.out    -> out;
+    }
+}
+
+//------------------------------------------------------------
+// CORE 1: SOFTCLOCK 3 GRAVITY ENGINE
+//------------------------------------------------------------
+processor SoftClock3
+{
+    input stream float bpm, entropy;
+    output event bool beatTrigger;
+
+    float phase = 0;
+
+    void main()
+    {
+        loop
+        {
+            float targetHz = (bpm / 60.0f) * 4.0f; // 16th note subdivision
+            float baseStep = targetHz / float (processor.frequency);
+            
+            // RELATIVISTIC WARP: Entropy acts as mass dragging the phase
+            float warp = sin (phase * 2.0f * float (pi)) * (entropy * 0.00008f);
+            phase += (baseStep - warp);
+
+            if (phase >= 1.0f)
+            {
+                phase -= 1.0f;
+                beatTrigger << true;
+            }
+            advance();
+        }
+    }
+}
+
+//------------------------------------------------------------
+// CORE 2: NEURAL ENTROPY SYNTHESIS
+//------------------------------------------------------------
+processor NeuralCore
+{
+    input event std::notes::Message midiIn;
+    input stream float grit;
+    output stream float out;
+
+    struct Voice {
+        float phase, delta, env;
+        bool active;
+    }
+
+    Voice[16] voices;
+
+    event midiIn (std::notes::Message m)
+    {
+        if (m.isNoteOn())
+        {
+            int idx = m.getNoteNumber() % 16;
+            voices[idx].delta = float (std::notes::noteToFrequency (m.getNoteNumber())) / float (processor.frequency);
+            voices[idx].env = m.getVelocity();
+            voices[idx].active = true;
+        }
+    }
+
+    void main()
+    {
+        loop
+        {
+            float mix = 0;
+            // First-Principles Bit Masking
+            // We simulate 32-bit integer truncation in a floating-point environment
+            float currentGrit = grit;
+            float bitRes = pow (2.0f, 16.0f * (1.0f - currentGrit));
+
+            for (wrap<16> i)
+            {
+                if (voices[i].active)
+                {
+                    voices[i].phase += voices[i].delta;
+                    if (voices[i].phase >= 1.0f) voices[i].phase -= 1.0f;
+
+                    float raw = sin (voices[i].phase * 2.0f * float (pi));
+                    
+                    // THE GRIT: Truncate signal to the calculated bit-resolution
+                    float quantized = floor (raw * bitRes) / bitRes;
+                    
+                    mix += quantized * voices[i].env;
+                    voices[i].env *= 0.9997f; // Exponential Decay
+                    
+                    if (voices[i].env < 0.001f) voices[i].active = false;
+                }
+            }
+            out << tanh (mix);
+            advance();
+        }
+    }
+}
+
+//------------------------------------------------------------
+// CORE 3: REME (REMEMBRANCE) BUFFER
+//------------------------------------------------------------
+processor RemeBuffer
+{
+    input stream float audioIn, recollect;
+    output stream float out;
+
+    // 5-Second Buffer for high-fidelity recollection
+    float[220500] memory; 
+    int writePtr = 0;
+
+    void main()
+    {
+        loop
+        {
+            memory[writePtr] = audioIn;
+            
+            int offset = int (recollect * 220000.0f);
+            int readPtr = (writePtr - offset + 220500) % 220500;
+            
+            float ghost = memory[readPtr];
+            out << (audioIn * (1.0f - recollect)) + (ghost * recollect);
+            
+            writePtr = (writePtr + 1) % 220500;
+            advance();
+        }
+    }
+}
