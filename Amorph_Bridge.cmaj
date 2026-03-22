@@ -1,0 +1,503 @@
+//==============================================================================
+// AMORPH BRIDGE — QASAR M8 × DARK MIND MK3
+// OWNERSHIP: SEALS ESTATE (L.S. / L.D. / L.S.)
+// mirror_gain: QASAR stereoWidth → RemeBuffer feedback coefficient
+// Signal Priority: Clock→Gate | Reme→Wavetable | Width→Feedback | BankMorph
+// ALL RIGHTS RESERVED // 2026
+//==============================================================================
+
+graph Amorph_Bridge [[ main ]]
+{
+    //------------------------------------------------------------------
+    // INPUTS
+    //------------------------------------------------------------------
+    input stream float grit         [[ name: "Grit (Entropy)",      min: 0,    max: 1.0,  init: 0.1  ]];
+    input stream float bpm          [[ name: "BPM (Gravity)",        min: 40,   max: 300,  init: 120  ]];
+    input stream float recollect    [[ name: "Reme (Memory)",        min: 0,    max: 1.0,  init: 0    ]];
+    input stream float stereoWidth  [[ name: "Stereo Width (QASAR)", min: 0,    max: 2.8,  init: 1.0  ]];
+    input stream float mirrorGain   [[ name: "Mirror Gain",          min: 0,    max: 1.0,  init: 0.5  ]];
+    input stream float bankMorph    [[ name: "Bank Morph",           min: 0,    max: 3.0,  init: 0.0  ]];
+    input stream float masterRate   [[ name: "Master Rate (Hz)",     min: 1000, max: 22050,init: 8000 ]];
+
+    input event std::notes::Message midiIn;
+
+    //------------------------------------------------------------------
+    // OUTPUTS
+    //------------------------------------------------------------------
+    output stream float<2> out;
+
+    //------------------------------------------------------------------
+    // NODE ARCHITECTURE
+    //------------------------------------------------------------------
+
+    // Priority 1: Clock → QASAR voice gate (Page R equivalent)
+    node clock      = SoftClock3;
+
+    // Priority 2: QASAR additive wavetable engine (8-bit CMI core)
+    node qasar      = QasarCore;
+
+    // Priority 2: RemeBuffer fed by QASAR output (live wavetable capture)
+    node reme       = RemeBuffer;
+
+    // mirror_gain bridge: Width → Reme feedback scalar
+    node mirror     = MirrorGainBridge;
+
+    // Priority 3: Stereo width stage (QASAR master stereo)
+    node stereo     = StereoWidener;
+
+    //------------------------------------------------------------------
+    // CONNECTIONS
+    //------------------------------------------------------------------
+    connection
+    {
+        // --- Priority 1: SoftClock3 → QASAR Page R gate ---
+        bpm             -> clock.bpm;
+        grit            -> clock.entropy;
+        clock.beatGate  -> qasar.gateIn;       // rhythmic entrainment
+
+        // --- Priority 2a: MIDI + params → QASAR engine ---
+        midiIn          -> qasar.midiIn;
+        grit            -> qasar.grit;
+        masterRate      -> qasar.masterRate;
+        bankMorph       -> qasar.bankMorph;
+
+        // --- Priority 2b: QASAR → RemeBuffer (live wavetable input) ---
+        qasar.monoOut   -> reme.audioIn;
+        recollect       -> reme.recollect;
+
+        // --- mirror_gain: stereoWidth reflected into Reme feedback ---
+        stereoWidth     -> mirror.widthIn;
+        mirrorGain      -> mirror.gainIn;
+        mirror.feedbackScale -> reme.feedbackScale;  // width drives how much past bleeds in
+
+        // --- Priority 3: Reme → Stereo widener → output ---
+        reme.out        -> stereo.monoIn;
+        stereoWidth     -> stereo.width;
+        stereo.out      -> out;
+    }
+}
+
+//==============================================================================
+// SOFTCLOCK 3 — Relativistic Beat Gate (Page R driver)
+// Upgraded: outputs a float gate signal (0/1) instead of bool event
+// so QASAR can use it for amplitude entrainment per-voice
+//==============================================================================
+processor SoftClock3
+{
+    input stream float bpm, entropy;
+    output stream float beatGate;   // float so QASAR can multiply directly
+
+    float phase = 0.0f;
+    float gateHold = 0.0f;
+    int   holdSamples = 0;
+    int   holdCounter = 0;
+
+    // Gate length: ~10% of 16th note period — tight click feel
+    int calcHoldLen (float bpmVal)
+    {
+        float sixteenthSec = 15.0f / bpmVal;           // 60/(bpm*4)
+        return int (sixteenthSec * float (processor.frequency) * 0.10f);
+    }
+
+    void main()
+    {
+        loop
+        {
+            float targetHz  = (bpm / 60.0f) * 4.0f;
+            float baseStep  = targetHz / float (processor.frequency);
+
+            // Relativistic warp: entropy acts as gravitational mass on phase
+            float warp = sin (phase * 2.0f * float (pi)) * (entropy * 0.00008f);
+            phase += (baseStep - warp);
+
+            if (phase >= 1.0f)
+            {
+                phase -= 1.0f;
+                holdSamples = calcHoldLen (bpm);
+                holdCounter = holdSamples;
+            }
+
+            // Output gate: open for holdSamples after each beat trigger
+            if (holdCounter > 0)
+            {
+                beatGate << 1.0f;
+                holdCounter--;
+            }
+            else
+            {
+                beatGate << 0.0f;
+            }
+
+            advance();
+        }
+    }
+}
+
+//==============================================================================
+// QASAR CORE — 8-bit Additive Wavetable Engine (CMI Series I/II class)
+//
+// - 4 harmonic banks, 48 partials each (cosine-phase, CMI Page D style)
+// - masterRate decimation via zero-order hold (CMI D/A character)
+// - bankMorph: crossfades spectrum between adjacent banks
+// - gateIn from SoftClock3: rhythmically re-triggers all active voices
+// - monoOut: pre-stereo signal sent to RemeBuffer for live wavetable capture
+//==============================================================================
+processor QasarCore
+{
+    input stream float  grit;
+    input stream float  masterRate;
+    input stream float  bankMorph;
+    input stream float  gateIn;         // from SoftClock3
+
+    input event std::notes::Message midiIn;
+
+    output stream float monoOut;
+
+    //------------------------------------------------------------------
+    // Harmonic banks — 4 banks × 48 partials (CMI Page D equivalent)
+    // Initialised as Fairlight-class timbres (see presets/bank_init.json)
+    //------------------------------------------------------------------
+    float[4][48] spectrum;
+
+    // Computed wavetable per bank (256 samples, signed 8-bit range)
+    float[4][256] wavetable;
+
+    bool tablesReady = false;
+
+    //------------------------------------------------------------------
+    // Voice pool — 16 voices, round-robin allocation
+    //------------------------------------------------------------------
+    struct Voice
+    {
+        float phase;
+        float delta;        // phase increment per sample at host rate
+        float env;
+        float masterPhase;  // separate accumulator for rate-decimation
+        float held;         // last ZOH sample
+        bool  active;
+        int   lastIdx;
+    }
+
+    Voice[16] voices;
+    int rrPtr = 0;          // round-robin write pointer
+
+    //------------------------------------------------------------------
+    // Build additive wavetable for bank b using current spectrum
+    // Cosine-phase synthesis (CMI Page D behaviour)
+    //------------------------------------------------------------------
+    void buildTable (int b)
+    {
+        float[256] tmp;
+        float maxVal = 1e-6f;
+
+        for (int n = 0; n < 256; ++n)
+        {
+            float sum = 0.0f;
+            for (int h = 1; h < 48; ++h)
+            {
+                float theta = 2.0f * float (pi) * float (h) * float (n) / 256.0f;
+                sum += spectrum[b][h] * cos (theta);
+            }
+            tmp[n] = sum;
+            if (abs (sum) > maxVal) maxVal = abs (sum);
+        }
+
+        for (int n = 0; n < 256; ++n)
+            wavetable[b][n] = (tmp[n] / maxVal) * 127.0f;    // 8-bit range
+    }
+
+    //------------------------------------------------------------------
+    // Initialise spectra — Fairlight-class timbres per bank
+    //
+    // Bank 0: ORCH5 class — dense odd harmonics, harsh rolloff
+    // Bank 1: SHAKUHACHI class — breathed fundamental + 2nd partial
+    // Bank 2: VOICE class — formant-peaked mid harmonics
+    // Bank 3: BELL class — inharmonic partial series (scaled)
+    //------------------------------------------------------------------
+    void initSpectra()
+    {
+        // Bank 0: ORCH5 — brass stab character
+        spectrum[0][1]  = 1.00f;
+        spectrum[0][2]  = 0.80f;
+        spectrum[0][3]  = 0.55f;
+        spectrum[0][4]  = 0.38f;
+        spectrum[0][5]  = 0.60f;   // 5th partial peak (brass formant)
+        spectrum[0][6]  = 0.20f;
+        spectrum[0][7]  = 0.28f;
+        spectrum[0][9]  = 0.15f;
+        spectrum[0][11] = 0.10f;
+
+        // Bank 1: SHAKUHACHI — breathy, dominant fundamental
+        spectrum[1][1]  = 1.00f;
+        spectrum[1][2]  = 0.42f;
+        spectrum[1][3]  = 0.08f;
+        spectrum[1][4]  = 0.18f;   // breath noise partial
+        spectrum[1][6]  = 0.06f;
+
+        // Bank 2: VOICE — formant cluster around partials 3–5
+        spectrum[2][1]  = 0.50f;
+        spectrum[2][2]  = 0.70f;
+        spectrum[2][3]  = 1.00f;
+        spectrum[2][4]  = 0.90f;
+        spectrum[2][5]  = 0.75f;
+        spectrum[2][6]  = 0.30f;
+        spectrum[2][7]  = 0.12f;
+
+        // Bank 3: BELL — CMI bell preset, inharmonic partial spacing
+        spectrum[3][1]  = 1.00f;
+        spectrum[3][3]  = 0.60f;
+        spectrum[3][5]  = 0.35f;
+        spectrum[3][7]  = 0.22f;
+        spectrum[3][14] = 0.14f;
+        spectrum[3][28] = 0.09f;
+
+        for (int b = 0; b < 4; ++b)
+            buildTable (b);
+
+        tablesReady = true;
+    }
+
+    //------------------------------------------------------------------
+    // Read morphed wavetable sample: crossfade between adjacent banks
+    // bankMorph 0.0 = bank 0 only, 1.0 = equal mix bank0+bank1, etc.
+    //------------------------------------------------------------------
+    float readMorphed (float phase, float morph)
+    {
+        int   bankA = int (morph) % 4;
+        int   bankB = (bankA + 1) % 4;
+        float frac  = morph - float (int (morph));
+
+        int idx = int (phase * 256.0f) % 256;
+        if (idx < 0) idx += 256;
+
+        float sA = wavetable[bankA][idx] / 127.0f;
+        float sB = wavetable[bankB][idx] / 127.0f;
+
+        return sA + frac * (sB - sA);
+    }
+
+    //------------------------------------------------------------------
+    // MIDI voice allocation — round-robin (fixes modulo collision bug)
+    //------------------------------------------------------------------
+    event midiIn (std::notes::Message m)
+    {
+        if (m.isNoteOn())
+        {
+            // Round-robin: find next slot
+            int slot = rrPtr % 16;
+            rrPtr = (rrPtr + 1) % 16;
+
+            float freq = float (std::notes::noteToFrequency (m.getNoteNumber()));
+
+            voices[slot].delta      = freq / float (processor.frequency);
+            voices[slot].env        = float (m.getVelocity());
+            voices[slot].phase      = 0.0f;
+            voices[slot].masterPhase= 0.0f;
+            voices[slot].held       = 0.0f;
+            voices[slot].lastIdx    = -1;
+            voices[slot].active     = true;
+        }
+        else if (m.isNoteOff())
+        {
+            // Find matching voice by delta proximity and begin fast release
+            float freq  = float (std::notes::noteToFrequency (m.getNoteNumber()));
+            float delta = freq / float (processor.frequency);
+            for (wrap<16> i)
+            {
+                if (voices[i].active && abs (voices[i].delta - delta) < 1e-6f)
+                {
+                    voices[i].env *= 0.5f;   // snap to release
+                    break;
+                }
+            }
+        }
+    }
+
+    void main()
+    {
+        initSpectra();
+
+        loop
+        {
+            if (!tablesReady) { monoOut << 0.0f; advance(); continue; }
+
+            float currentGrit   = grit;
+            float currentRate   = masterRate;
+            float currentMorph  = bankMorph;
+            float gate          = gateIn;
+
+            // Bit resolution: 2^(16*(1-grit)) — CMI dynamic decimation
+            float bitRes = pow (2.0f, 16.0f * (1.0f - currentGrit));
+
+            // Decimation ratio: host rate → master rate (ZOH character)
+            float decimStep = currentRate / float (processor.frequency);
+
+            float mix = 0.0f;
+
+            for (wrap<16> i)
+            {
+                if (!voices[i].active) continue;
+
+                // SoftClock3 gate: re-trigger envelope on beat
+                // (Page R: rhythmic amplitude entrainment)
+                if (gate > 0.5f && voices[i].env < 0.05f)
+                    voices[i].env = 0.4f * gate;   // soft retrigger, not full velocity
+
+                // Advance master-rate phase accumulator (ZOH decimation)
+                voices[i].masterPhase += decimStep;
+                int idx = int (voices[i].masterPhase * 256.0f) % 256;
+                if (idx < 0) idx += 256;
+
+                if (idx != voices[i].lastIdx)
+                {
+                    float raw = readMorphed (voices[i].masterPhase, currentMorph);
+
+                    // CMI Dynamic decimation (grit = bit-depth loss)
+                    float quantized = floor (raw * bitRes) / bitRes;
+                    voices[i].held  = quantized;
+                    voices[i].lastIdx = idx;
+                }
+
+                mix += voices[i].held * voices[i].env;
+
+                // Advance voice pitch phase
+                voices[i].phase += voices[i].delta;
+                if (voices[i].phase >= 1.0f) voices[i].phase -= 1.0f;
+
+                // Envelope decay
+                voices[i].env *= 0.9997f;
+                if (voices[i].env < 0.001f) voices[i].active = false;
+            }
+
+            monoOut << tanh (mix);
+            advance();
+        }
+    }
+}
+
+//==============================================================================
+// MIRROR GAIN BRIDGE
+// Converts QASAR stereoWidth + mirrorGain knob into a feedback scale
+// for RemeBuffer. The wider the stereo field, the more temporal depth.
+//
+//   feedbackScale = mirrorGain * (stereoWidth / 2.8)
+//
+// At width=0 (mono): no temporal mirror — dry signal only
+// At width=2.8 (max): full mirrorGain bleeds into the past
+//==============================================================================
+processor MirrorGainBridge
+{
+    input stream float widthIn;
+    input stream float gainIn;
+    output stream float feedbackScale;
+
+    void main()
+    {
+        loop
+        {
+            float normalised = widthIn / 2.8f;   // 0..1
+            feedbackScale << gainIn * normalised;
+            advance();
+        }
+    }
+}
+
+//==============================================================================
+// REME BUFFER — Remembrance Engine (upgraded)
+// - feedbackScale input: mirror_gain drives how much ghost bleeds back
+// - Loop crossfade: 64-sample window at buffer wraparound (CMI loop character)
+// - 5-second archive at 44.1kHz
+//==============================================================================
+processor RemeBuffer
+{
+    input stream float audioIn;
+    input stream float recollect;
+    input stream float feedbackScale;   // mirror_gain input
+
+    output stream float out;
+
+    float[220500] memory;
+    int writePtr = 0;
+
+    // Crossfade window length (samples) — CMI loop boundary character
+    let xfadeLen = 64;
+
+    void main()
+    {
+        loop
+        {
+            // Write with ghost feedback (mirror_gain: past re-enters present)
+            // feedbackScale = mirrorGain * normalisedWidth
+            int prevPtr = (writePtr - 1 + 220500) % 220500;
+            memory[writePtr] = audioIn + memory[prevPtr] * feedbackScale * 0.999f;
+
+            // Read head: recollect offsets into the past
+            int offset  = int (recollect * 220000.0f);
+            int readPtr = (writePtr - offset + 220500) % 220500;
+
+            // Loop crossfade: blend near the buffer boundary to get CMI loop click character
+            float ghost = memory[readPtr];
+
+            // Crossfade region: if within xfadeLen of the offset boundary,
+            // blend with the adjacent frame to soften (or intentionally colour) the loop point
+            int xfadePtr = (readPtr + xfadeLen) % 220500;
+            float xfadeSample = memory[xfadePtr];
+            float xfadeAmt = float ((offset % xfadeLen)) / float (xfadeLen);
+            ghost = ghost * (1.0f - xfadeAmt * 0.3f) + xfadeSample * (xfadeAmt * 0.3f);
+
+            // Output: dry/wet blend driven by recollect
+            out << (audioIn * (1.0f - recollect)) + (ghost * recollect);
+
+            writePtr = (writePtr + 1) % 220500;
+            advance();
+        }
+    }
+}
+
+//==============================================================================
+// STEREO WIDENER — QASAR M8 Master Stereo (ported from C++ engine)
+// Phase rotation trick (L/R asymmetry via sin/cos offset)
+// Spread accumulator kept modulo 2π to prevent float precision loss
+//==============================================================================
+processor StereoWidener
+{
+    input stream float monoIn;
+    input stream float width;
+
+    output stream float<2> out;
+
+    float spread = 0.0f;
+
+    void main()
+    {
+        loop
+        {
+            float mono  = monoIn;
+            float w     = width;
+
+            // Wrap spread (fixes unbounded accumulation from original QASAR C++)
+            spread = std::math::remainder (spread + 0.0004f, 2.0f * float (pi));
+
+            float left  = mono;
+            float right = mono;
+
+            if (w > 0.001f)
+            {
+                float sideGain  = w * 0.75f / 2.8f;  // normalise to 0..1 range
+                float phaseMod  = sin (spread * 0.35f) * 0.14f;
+                float sideLeft  = mono * cos (phaseMod);
+                float sideRight = mono * sin (phaseMod + 0.9f);
+
+                left  = mono * (1.0f - sideGain) + sideLeft  * sideGain;
+                right = mono * (1.0f - sideGain) + sideRight * sideGain;
+            }
+
+            // Soft clip (CMI early DAC saturation)
+            left  = max (-1.0f, min (1.0f, left));
+            right = max (-1.0f, min (1.0f, right));
+
+            out << float<2> (left, right);
+            advance();
+        }
+    }
+}
