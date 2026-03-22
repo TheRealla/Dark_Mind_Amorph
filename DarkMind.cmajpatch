@@ -1,0 +1,122 @@
+{
+    "CmajorVersion": 1,
+    "ID":            "com.sealsestate.darkmind.mk3",
+    "version":       "3.1.0",
+    "name":          "Dark Mind Mk3",
+    "description":   "Fairlight-class sample engine · SoftClock3 relativistic rhythm · Read.E ghost memory",
+    "category":      "Synth",
+    "manufacturer":  "Seals Estate",
+    "website":       "https://github.com/TheRealla/Dark_Mind_Amorph",
+    "isInstrument":  true,
+
+    "source": [ "Mk3.cmaj" ],
+
+    "view": {
+        "width":     800,
+        "height":    500,
+        "resizable": true
+    },
+
+    "presets": [
+        {
+            "name": "ORCH5 — Fairlight brass",
+            "description": "Heavy bit-crush on a short buffer read. The aliased brass stab that defined the CMI.",
+            "parameters": {
+                "Grit (Entropy)":  0.72,
+                "BPM (Gravity)":   120.0,
+                "Reme (Memory)":   0.18,
+                "Density":         0.85
+            }
+        },
+        {
+            "name": "SHAKUHACHI — breath flute",
+            "description": "Low grit preserves the formant. High recollect smears the breath trail into ghost tones.",
+            "parameters": {
+                "Grit (Entropy)":  0.31,
+                "BPM (Gravity)":   90.0,
+                "Reme (Memory)":   0.44,
+                "Density":         0.40
+            }
+        },
+        {
+            "name": "VOICE RAW — vowel smear",
+            "description": "Mid grit softens consonants. Memory bleed turns phonemes into formant pads.",
+            "parameters": {
+                "Grit (Entropy)":  0.55,
+                "BPM (Gravity)":   100.0,
+                "Reme (Memory)":   0.62,
+                "Density":         0.60
+            }
+        },
+        {
+            "name": "STAB DARK — hard digital",
+            "description": "Maximum grit, no tail. Percussive transient with zero recollection. Page R staple.",
+            "parameters": {
+                "Grit (Entropy)":  0.88,
+                "BPM (Gravity)":   140.0,
+                "Reme (Memory)":   0.05,
+                "Density":         1.20
+            }
+        },
+        {
+            "name": "GHOST PAD — dissolution",
+            "description": "Near-clean tone, maximum recollection. The past almost fully replaces the present.",
+            "parameters": {
+                "Grit (Entropy)":  0.12,
+                "BPM (Gravity)":   60.0,
+                "Reme (Memory)":   0.91,
+                "Density":         0.30
+            }
+        },
+        {
+            "name": "PAGE R PERC — 1-bit grid",
+            "description": "Grit at ceiling collapses bit-depth to near-binary. SoftClock3 at fast tempo drives rhythmic re-trigger.",
+            "parameters": {
+                "Grit (Entropy)":  0.95,
+                "BPM (Gravity)":   160.0,
+                "Reme (Memory)":   0.00,
+                "Density":         1.60
+            }
+        },
+        {
+            "name": "CMI BELL — partial series",
+            "description": "Low grit, moderate recollect. The harmonic envelope mimics the original Fairlight bell wavetable.",
+            "parameters": {
+                "Grit (Entropy)":  0.28,
+                "BPM (Gravity)":   80.0,
+                "Reme (Memory)":   0.33,
+                "Density":         0.45
+            }
+        },
+        {
+            "name": "LAILA STAR — signature",
+            "description": "Balanced grit with slow gravity clock. The Read.E sits at the boundary where present and past dissolve equally.",
+            "parameters": {
+                "Grit (Entropy)":  0.50,
+                "BPM (Gravity)":   72.0,
+                "Reme (Memory)":   0.50,
+                "Density":         0.70
+            }
+        },
+        {
+            "name": "THERMAL EDGE — density ceiling",
+            "description": "Density approaching the Neural Shutdown threshold. Signal saturates at the tanh wall before the 800ms reset.",
+            "parameters": {
+                "Grit (Entropy)":  0.65,
+                "BPM (Gravity)":   130.0,
+                "Reme (Memory)":   0.25,
+                "Density":         1.90
+            }
+        },
+        {
+            "name": "COLD READ — minimum entropy",
+            "description": "Full 16-bit resolution from the sample bank. No warp, no decay. Clinical and bright.",
+            "parameters": {
+                "Grit (Entropy)":  0.00,
+                "BPM (Gravity)":   120.0,
+                "Reme (Memory)":   0.00,
+                "Density":         0.50
+            }
+        }
+    ]
+}
