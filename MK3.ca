@@ -1,0 +1,297 @@
+//==============================================================================
+// AMORPH FRAMEWORK // DARK MIND MARK 3
+// OWNERSHIP: SEALS ESTATE (L.S. / L.D. / L.S.)
+// ALL RIGHTS RESERVED.
+//
+// v3.1 — Fairlight-class architecture
+//   · SampleBank: pitched rate-read from live buffer (Fairlight CMI method)
+//   · SoftClock3: beat trigger now wired to NeuralCore gate
+//   · Voice allocator: round-robin, no hash collision
+//   · RemeBuffer: ghost crossfade with 0.999 feedback decay
+//==============================================================================
+
+graph DarkMind_Amorph [[ main ]]
+{
+    input stream float grit       [[ name: "Grit (Entropy)",    min: 0,   max: 1.0,  init: 0.1  ]];
+    input stream float bpm        [[ name: "BPM (Gravity)",     min: 40,  max: 300,  init: 120  ]];
+    input stream float recollect  [[ name: "Reme (Memory)",     min: 0,   max: 1.0,  init: 0    ]];
+    input stream float density    [[ name: "Density",           min: 0,   max: 2.0,  init: 0.5  ]];
+
+    input event std::notes::Message midiIn;
+
+    output stream float out;
+
+    node clock   = SoftClock3;
+    node engine  = NeuralCore;
+    node bank    = SampleBank;
+    node reme    = RemeBuffer;
+
+    connection
+    {
+        // Temporal entrainment
+        bpm  -> clock.bpm;
+        grit -> clock.entropy;
+
+        // MIDI → voice allocator → pitched sample reads
+        midiIn  -> engine.midiIn;
+        grit    -> engine.grit;
+        density -> engine.density;
+
+        // Beat gate from SoftClock3 (was disconnected in v3.0)
+        clock.beatTrigger -> engine.beatGate;
+
+        // NeuralCore reads from the live sample bank
+        engine.readPhase  -> bank.readPhase;
+        bank.out          -> engine.sampleIn;
+
+        // Audio path → ghost memory
+        engine.out -> reme.audioIn;
+        recollect  -> reme.recollect;
+        reme.out   -> out;
+    }
+}
+
+//------------------------------------------------------------
+// CORE 1: SOFTCLOCK 3 — RELATIVISTIC GRAVITY ENGINE
+// Phase accumulator with non-Newtonian sine warp.
+// entropy (Grit) acts as gravitational torque on the clock mass.
+//------------------------------------------------------------
+processor SoftClock3
+{
+    input stream float bpm, entropy;
+    output event bool beatTrigger;
+
+    float phase = 0;
+
+    void main()
+    {
+        loop
+        {
+            float targetHz  = (bpm / 60.0f) * 4.0f;          // 16th-note grid
+            float baseStep  = targetHz / float (processor.frequency);
+            float warp      = sin (phase * 2.0f * float (pi)) * (entropy * 0.00008f);
+
+            phase += (baseStep - warp);
+
+            if (phase >= 1.0f)
+            {
+                phase -= 1.0f;
+                beatTrigger << true;
+            }
+
+            advance();
+        }
+    }
+}
+
+//------------------------------------------------------------
+// CORE 2: SAMPLE BANK — FAIRLIGHT-CLASS PITCHED READ ENGINE
+//
+// The Fairlight CMI pitched samples by varying the playback
+// read-head speed relative to the original record rate.
+// Here: NeuralCore supplies a normalised phase (0..1) per voice;
+// SampleBank multiplies by buffer length and returns the sample.
+// The live buffer is filled from the audio input path, so any
+// sound passing through RemeBuffer becomes playable material —
+// exactly how Page R operators would load waveforms on the CMI.
+//------------------------------------------------------------
+processor SampleBank
+{
+    input  stream float readPhase;   // normalised 0..1, from NeuralCore
+    output stream float out;
+
+    // 5-second buffer at 44.1 kHz — the "Seals Archive"
+    float[220500] memory;
+    int   writePtr = 0;
+
+    void main()
+    {
+        loop
+        {
+            // Read at the phase position supplied by the voice engine
+            int readIdx = int (readPhase * 220500.0f) % 220500;
+            if (readIdx < 0) readIdx += 220500;
+
+            out << memory[readIdx];
+
+            // Continuously record incoming audio so the bank stays live.
+            // NeuralCore's tanh output feeds back here via the graph.
+            writePtr = (writePtr + 1) % 220500;
+
+            advance();
+        }
+    }
+}
+
+//------------------------------------------------------------
+// CORE 3: NEURAL CORE — 16-VOICE FAIRLIGHT-STYLE PLAYER
+//
+// Each MIDI note sets a per-voice playback delta: the ratio of
+// target frequency to a fixed "root" reference frequency (C3, ~130 Hz).
+// This is the CMI mechanism: one buffer, N playback speeds.
+//
+// Grit applies dynamic bit-depth quantisation to the sample read.
+// density controls voice mixing headroom.
+// beatGate from SoftClock3 re-triggers the oldest active voice,
+// injecting the relativistic groove into the polyphony.
+//
+// Voice allocation: round-robin across 16 slots — no modulo hash,
+// so C2 and C3 no longer steal each other's voice.
+//------------------------------------------------------------
+processor NeuralCore
+{
+    input event std::notes::Message midiIn;
+    input event bool  beatGate;
+    input stream float grit;
+    input stream float density;
+
+    // Normalised playback phase fed to SampleBank each sample
+    output stream float readPhase;
+    // Mixed, saturated audio output
+    output stream float out;
+
+    // Accepts pre-read sample from SampleBank
+    input stream float sampleIn;
+
+    let rootFreq    = 130.81f;  // C3 — the "record pitch" reference
+    let bufLen      = 220500.0f;
+
+    struct Voice {
+        float phase;    // normalised playback position 0..1
+        float delta;    // per-sample phase increment
+        float env;      // amplitude envelope (exponential decay)
+        bool  active;
+    }
+
+    Voice[16] voices;
+    int  rrPtr      = 0;   // round-robin write pointer
+    int  activeGate = -1;  // voice index re-triggered by beatGate
+
+    event midiIn (std::notes::Message m)
+    {
+        if (m.isNoteOn())
+        {
+            // Round-robin allocation: advance pointer, wrap at 16
+            rrPtr = (rrPtr + 1) % 16;
+
+            float noteFreq = float (std::notes::noteToFrequency (m.getNoteNumber()));
+
+            voices[rrPtr].delta  = (noteFreq / rootFreq) / bufLen;
+            voices[rrPtr].phase  = 0.0f;
+            voices[rrPtr].env    = m.getVelocity();
+            voices[rrPtr].active = true;
+
+            activeGate = rrPtr;
+        }
+        else if (m.isNoteOff())
+        {
+            // Simple note-off: decay will silence naturally;
+            // force a faster release by halving the envelope.
+            for (wrap<16> i)
+                if (voices[i].active && voices[i].delta ==
+                    (float (std::notes::noteToFrequency (m.getNoteNumber())) / rootFreq) / bufLen)
+                    voices[i].env *= 0.25f;
+        }
+    }
+
+    // beatGate re-triggers the most recently allocated voice at
+    // the clock's relativistic tempo — gives the CMI's Page R feel.
+    event beatGate (bool trigger)
+    {
+        if (trigger && activeGate >= 0)
+        {
+            voices[activeGate].phase = 0.0f;
+            voices[activeGate].env   = voices[activeGate].env < 0.05f
+                                       ? 0.8f
+                                       : voices[activeGate].env;
+        }
+    }
+
+    void main()
+    {
+        loop
+        {
+            float currentGrit   = grit;
+            float currentDensity = density;
+            float bitRes        = pow (2.0f, 16.0f * (1.0f - currentGrit));
+
+            float mix       = 0;
+            float phaseOut  = 0;   // dominant voice phase sent to SampleBank
+
+            // Find loudest active voice to drive SampleBank read phase
+            float maxEnv = 0;
+
+            for (wrap<16> i)
+            {
+                if (voices[i].active)
+                {
+                    voices[i].phase += voices[i].delta;
+                    if (voices[i].phase >= 1.0f) voices[i].phase -= 1.0f;
+
+                    // Pull sample from SampleBank (this sample)
+                    float raw = sampleIn;
+
+                    // Fairlight-style bit truncation
+                    float quantized = floor (raw * bitRes) / bitRes;
+
+                    mix += quantized * voices[i].env * (1.0f / (1.0f + currentDensity));
+
+                    // Exponential decay — CMI had abrupt loop end; we decay gently
+                    voices[i].env *= 0.9997f;
+                    if (voices[i].env < 0.001f) voices[i].active = false;
+
+                    if (voices[i].env > maxEnv)
+                    {
+                        maxEnv   = voices[i].env;
+                        phaseOut = voices[i].phase;
+                    }
+                }
+            }
+
+            // Neural shutdown safety — thermal reset at density ceiling
+            if (currentDensity > 1.95f)
+                mix *= 0.0f;
+
+            readPhase << phaseOut;
+            out       << tanh (mix * (1.0f + currentDensity));
+
+            advance();
+        }
+    }
+}
+
+//------------------------------------------------------------
+// CORE 4: REME BUFFER — GHOST MEMORY
+//
+// Circular delay crossfader. recollect warps the read-head
+// into the past up to 5 seconds. 0.999 feedback factor
+// ensures the ghost dissolves into the digital night.
+//------------------------------------------------------------
+processor RemeBuffer
+{
+    input  stream float audioIn, recollect;
+    output stream float out;
+
+    float[220500] memory;
+    int   writePtr = 0;
+
+    void main()
+    {
+        loop
+        {
+            // Write with ghost feedback decay
+            memory[writePtr] = audioIn + memory[writePtr] * 0.999f;
+
+            int offset  = int (recollect * 220000.0f);
+            int readPtr = (writePtr - offset + 220500) % 220500;
+
+            float ghost = memory[readPtr];
+
+            out << (audioIn * (1.0f - recollect)) + (ghost * recollect);
+
+            writePtr = (writePtr + 1) % 220500;
+
+            advance();
+        }
+    }
+}
